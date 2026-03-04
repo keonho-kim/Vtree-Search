@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::time::Instant;
 
 use crate::core::errors::{CoreError, CoreResult};
@@ -38,6 +39,8 @@ pub struct SearchRequestPayload {
     pub top_k: usize,
     pub entry_limit: usize,
     pub page_limit: usize,
+    pub candidate_pool_factor: usize,
+    pub early_stop_min_entries: usize,
     pub worker_concurrency: usize,
     pub postgres: PostgresConfigPayload,
     pub metadata: Option<Value>,
@@ -86,20 +89,43 @@ pub async fn execute_search(payload: SearchRequestPayload) -> CoreResult<SearchR
         .search_summary_nodes(&payload.query_embedding, payload.entry_limit)
         .await?;
 
-    let mut parent_score_map = HashMap::<String, f32>::new();
-    let mut expanded_pages = Vec::<PageNodeRecord>::new();
+    let target_candidate_count = payload
+        .top_k
+        .saturating_mul(payload.candidate_pool_factor.max(1));
+
+    let mut scanned_entry_count = 0usize;
+    let mut candidate_map = HashMap::<String, SearchCandidatePayload>::new();
     for entry in &entry_records {
-        parent_score_map.insert(entry.node_id.clone(), entry.score);
+        scanned_entry_count = scanned_entry_count.saturating_add(1);
         let pages = repository
             .fetch_pages_under_path(&entry.path, payload.page_limit)
             .await?;
-        expanded_pages.extend(pages);
+
+        for page in pages {
+            let candidate = to_candidate(page, entry.score);
+            match candidate_map.entry(candidate.node_id.clone()) {
+                Entry::Occupied(mut occupied) => {
+                    let existing = occupied.get();
+                    if candidate.score > existing.score
+                        || (candidate.score == existing.score && candidate.path < existing.path)
+                    {
+                        occupied.insert(candidate);
+                    }
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(candidate);
+                }
+            }
+        }
+
+        let enough_candidates = candidate_map.len() >= target_candidate_count;
+        let can_early_stop = scanned_entry_count >= payload.early_stop_min_entries;
+        if enough_candidates && can_early_stop {
+            break;
+        }
     }
 
-    let mut candidates = expanded_pages
-        .into_iter()
-        .map(|page| to_candidate(page, &parent_score_map))
-        .collect::<Vec<_>>();
+    let mut candidates = candidate_map.into_values().collect::<Vec<_>>();
 
     candidates.sort_by(|left, right| {
         right
@@ -111,7 +137,7 @@ pub async fn execute_search(payload: SearchRequestPayload) -> CoreResult<SearchR
 
     let elapsed = started.elapsed().as_millis();
     let metrics = SearchMetricsPayload {
-        entry_count: entry_records.len(),
+        entry_count: scanned_entry_count,
         page_count: candidates.len(),
         elapsed_ms: elapsed,
     };
@@ -123,20 +149,11 @@ pub async fn execute_search(payload: SearchRequestPayload) -> CoreResult<SearchR
     })
 }
 
-fn to_candidate(
-    page: PageNodeRecord,
-    parent_score_map: &HashMap<String, f32>,
-) -> SearchCandidatePayload {
-    let score = parent_score_map
-        .get(&page.parent_node_id)
-        .copied()
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-
+fn to_candidate(page: PageNodeRecord, parent_score: f32) -> SearchCandidatePayload {
     SearchCandidatePayload {
         node_id: page.node_id,
         path: page.path,
-        score,
+        score: parent_score.clamp(0.0, 1.0),
         content: page.content,
         image_url: page.image_url,
     }
@@ -176,6 +193,18 @@ fn validate_payload(payload: &SearchRequestPayload) -> CoreResult<()> {
     if payload.page_limit == 0 {
         return Err(CoreError::InvalidInput(
             "page_limit은 1 이상이어야 합니다".to_string(),
+        ));
+    }
+
+    if payload.candidate_pool_factor == 0 {
+        return Err(CoreError::InvalidInput(
+            "candidate_pool_factor는 1 이상이어야 합니다".to_string(),
+        ));
+    }
+
+    if payload.early_stop_min_entries == 0 {
+        return Err(CoreError::InvalidInput(
+            "early_stop_min_entries는 1 이상이어야 합니다".to_string(),
         ));
     }
 

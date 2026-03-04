@@ -1,4 +1,4 @@
-# Python 계층 개요 (Phase 3)
+# Python 계층 개요
 
 ## 관련 문서
 
@@ -17,7 +17,7 @@
 ## 핵심 클래스
 
 - `VtreeIngestor`
-  - 적재 업서트/갱신 트리거
+  - 문서 파싱, 요약 상태 누적, 적재 실행
 - `VTreeSearchEngine`
   - 잡 제출/워커 실행/상태 조회/결과 조회/취소
 
@@ -27,39 +27,36 @@
 - `contracts/`: DTO/잡 상태 모델
 - `runtime/`: Rust 브릿지 래퍼
 - `queue/`: Redis Streams 제어
-- `llm/`: LangChain 주입 DTO/어댑터
-- `ingestion/`: 적재 서비스 + `prompts/`
+- `llm/`: LangChain 어댑터
+- `ingestion/`: 적재 서비스 + `summary_state` + `prompts/`
 - `search/`: 검색 서비스
 
 ## Ingestion 멀티모달 처리 모듈
 
 - `ingestion/source_parser.py`
   - Markdown/PDF/DOCX 파싱
+  - Markdown 헤딩 추출 + 블록 변환
   - PDF 표/이미지 주석 본문 생성
-  - page 노드 변환
 - `ingestion/docx_layout.py`
   - DOCX 레이아웃 기반 페이지 추정(A4 기준)
-  - 문단/표 높이 추정
 - `ingestion/parser_helpers.py`
   - 표 HTML 직렬화
   - DOCX 제목 레벨 추정
   - PDF 이미지 bbox -> 픽셀 변환
-  - 블록 청킹
-- `ingestion/prompts/table_prompt.py`, `image_prompt.py`
-  - `TABLE_PROMPT`, `IMAGE_PROMPT` 상수
+  - 블록 청킹(`heading` 경계 포함)
+- `ingestion/summary_state.py`
+  - Redis writer lock
+  - `meta/page_done/subch/ch/doc` 누적 상태 관리
 
 ## Ingestion 부하 제어 포인트
 
 - `IngestionPreprocessConfig.sample_per_extension`
-  - 샘플 ingest(확장자별 1개)로 비용 검증
 - `IngestionPreprocessConfig.max_chunk_chars`
-  - 문단 결합 최대 길이 제한
 - `IngestionPreprocessConfig.enable_table_annotation`
-  - 표 주석 호출 on/off
 - `IngestionPreprocessConfig.enable_image_annotation`
-  - 이미지 주석 호출 on/off
 - `IngestionPreprocessConfig.asset_output_dir`
-  - 추출 이미지 저장 경로 제어
+- `SummaryStateConfig.ttl_sec`
+- `SummaryStateConfig.lock_ttl_sec`
 
 ## 책임 분리
 
@@ -67,7 +64,7 @@
 
 - Rust 실행 경로 연결
 - 잡 큐잉/재시도/DLQ
-- 명시적 예외 타입 제공
+- 적재 중간 상태(`summary_state`) 누적
 - LLM 호출 형식 강제
 
 ### 소비자 앱 책임
@@ -76,10 +73,31 @@
 - 인증/인가
 - 멀티테넌시
 - 요청 라우팅
-- 실제 모델 선택(OpenAI/Bedrock 등)
+- 실제 모델/키 관리
 
 ## `.env` 원칙
 
 - 라이브러리 내부에서 `.env`를 읽지 않는다.
-- `scripts/run-search.py`, `scripts/run-ingestion.py` 같은 드라이버 코드에서 `.env`를 읽어 설정을 주입한다.
-- LLM 설정은 `.env` 대신 팩토리 함수(`--llm-factory`)로 주입한다.
+- `scripts/run-search.py`, `scripts/run-ingestion.py`가 `.env`를 읽어 설정을 주입한다.
+- Postgres 키:
+  - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DATABASE`
+  - `VTREE_SUMMARY_TABLE`, `VTREE_PAGE_TABLE`, `VTREE_EMBEDDING_DIM`
+  - `POSTGRES_POOL_MIN`, `POSTGRES_POOL_MAX`, `POSTGRES_CONNECT_TIMEOUT_MS`, `POSTGRES_STATEMENT_TIMEOUT_MS`
+- Redis 키:
+  - `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_USERNAME`, `REDIS_PASSWORD`, `REDIS_USE_SSL`
+  - `REDIS_STREAM_SEARCH`, `REDIS_STREAM_SEARCH_DLQ`, `REDIS_CONSUMER_GROUP`
+  - `REDIS_MODULE_SEARCH`, `REDIS_MODULE_INGESTION`
+  - 현재 검색 잡 상태 해시에는 `REDIS_MODULE_SEARCH` 값이 기록된다.
+- 검색 제어 키:
+  - `QUEUE_MAX_LEN`, `QUEUE_REJECT_AT`, `JOB_RESULT_TTL_SEC`, `WORKER_BLOCK_MS`
+  - `WORKER_CONCURRENCY`, `JOB_MAX_RETRIES`, `JOB_RETRY_BASE_MS`, `JOB_RETRY_MAX_MS`
+  - `SEARCH_CANDIDATE_POOL_FACTOR`, `SEARCH_EARLY_STOP_MIN_ENTRIES`
+- 적재 제어 키:
+  - `INGEST_MAX_CHUNK_CHARS`, `INGEST_SAMPLE_PER_EXTENSION`
+  - `INGEST_ENABLE_TABLE_ANNOTATION`, `INGEST_ENABLE_IMAGE_ANNOTATION`
+  - `INGEST_ASSET_OUTPUT_DIR`, `SUMMARY_STATE_TTL_SEC`, `SUMMARY_STATE_LOCK_TTL_SEC`
+- Gemini 기준 키:
+  - `GOOGLE_API_KEY`
+  - `SEARCH_LLM_MODEL`
+  - `INGESTION_LLM_MODEL`
+- `temperature`는 드라이버 코드 고정값(`0.0`)이다.

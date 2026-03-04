@@ -18,6 +18,7 @@ from .models import (
     PostgresConfig,
     RedisQueueConfig,
     SearchConfig,
+    SummaryStateConfig,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "SearchConfig",
     "IngestionPreprocessConfig",
     "IngestionConfig",
+    "SummaryStateConfig",
 ]

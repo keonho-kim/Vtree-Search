@@ -249,7 +249,7 @@ def chunk_blocks(blocks: list[ExtractedBlock], max_chars: int) -> list[Extracted
     buffer: list[ExtractedBlock] = []
 
     for block in blocks:
-        if block.block_type in {"table", "image"}:
+        if block.block_type in {"table", "image", "heading"}:
             if buffer:
                 chunked.append(flush_buffer(buffer))
                 buffer.clear()

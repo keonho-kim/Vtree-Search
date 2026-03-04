@@ -14,5 +14,6 @@
 
 from .ingestor import VtreeIngestor
 from .source_parser import SourceParser, build_source_parser
+from .summary_state import RedisSummaryStateStore
 
-__all__ = ["VtreeIngestor", "SourceParser", "build_source_parser"]
+__all__ = ["VtreeIngestor", "SourceParser", "build_source_parser", "RedisSummaryStateStore"]

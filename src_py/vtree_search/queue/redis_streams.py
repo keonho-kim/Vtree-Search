@@ -115,6 +115,39 @@ class RedisSearchQueue:
         self._redis.hset(key, mapping=mapping)
         self._redis.expire(key, self._config.result_ttl_sec)
 
+    def find_job_id_by_fingerprint(self, fingerprint: str) -> str | None:
+        """fingerprint로 기존 잡 ID를 조회한다."""
+        value = self._redis.get(self._fingerprint_key(fingerprint))
+        if not value:
+            return None
+        return str(value)
+
+    def claim_fingerprint(self, fingerprint: str, job_id: str) -> bool:
+        """fingerprint 선점에 성공하면 True를 반환한다."""
+        claimed = self._redis.set(
+            self._fingerprint_key(fingerprint),
+            job_id,
+            nx=True,
+            ex=self._config.result_ttl_sec,
+        )
+        return bool(claimed)
+
+    def bind_fingerprint(self, fingerprint: str, job_id: str) -> None:
+        """fingerprint를 지정 잡 ID에 바인딩한다."""
+        self._redis.set(
+            self._fingerprint_key(fingerprint),
+            job_id,
+            ex=self._config.result_ttl_sec,
+        )
+
+    def release_fingerprint_if_owner(self, fingerprint: str, job_id: str) -> None:
+        """현재 owner일 때만 fingerprint 키를 제거한다."""
+        key = self._fingerprint_key(fingerprint)
+        current = self._redis.get(key)
+        if str(current) != job_id:
+            return
+        self._redis.delete(key)
+
     def enqueue(
         self,
         job_id: str,
@@ -265,6 +298,10 @@ class RedisSearchQueue:
     @staticmethod
     def _job_key(job_id: str) -> str:
         return f"job:{job_id}"
+
+    @staticmethod
+    def _fingerprint_key(fingerprint: str) -> str:
+        return f"job:fp:{fingerprint}"
 
 
 def _utc_now() -> str:

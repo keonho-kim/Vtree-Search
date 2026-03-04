@@ -5,7 +5,7 @@
 설명:
 - 라이브러리 본체는 환경 파일을 직접 읽지 않는다.
 - 이 스크립트는 검색 잡 제출 -> 워커 1회 실행 -> 결과 조회 흐름을 데모한다.
-- LLM은 LangChain 객체를 팩토리 함수로 생성해 인자로 주입한다.
+- LLM 모델명은 `.env`에서 읽고 temperature는 코드 상수로 고정해 주입한다.
 
 디자인 패턴:
 - 드라이버(Driver Script).
@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import os
 import sys
 from pathlib import Path
+
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from vtree_search import PostgresConfig, RedisQueueConfig, SearchConfig, VTreeSearchEngine
 
@@ -53,7 +54,10 @@ REQUIRED_ENV_KEYS = [
     "JOB_MAX_RETRIES",
     "JOB_RETRY_BASE_MS",
     "JOB_RETRY_MAX_MS",
+    "SEARCH_LLM_MODEL",
+    "GOOGLE_API_KEY",
 ]
+SEARCH_LLM_TEMPERATURE = 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,11 +70,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--top-k", type=int, default=5, help="최종 후보 개수")
     parser.add_argument("--worker", default="run-search-worker", help="워커 이름")
-    parser.add_argument(
-        "--llm-factory",
-        required=True,
-        help="LangChain 채팅 모델 팩토리 경로 (예: app.llm_factories:create_search_llm)",
-    )
     parser.add_argument(
         "--env-file",
         default=".env",
@@ -153,6 +152,8 @@ def build_config() -> SearchConfig:
         max_retries=int(os.environ["JOB_MAX_RETRIES"]),
         retry_base_ms=int(os.environ["JOB_RETRY_BASE_MS"]),
         retry_max_ms=int(os.environ["JOB_RETRY_MAX_MS"]),
+        candidate_pool_factor=int(os.environ.get("SEARCH_CANDIDATE_POOL_FACTOR", "3")),
+        early_stop_min_entries=int(os.environ.get("SEARCH_EARLY_STOP_MIN_ENTRIES", "1")),
     )
 
 
@@ -165,14 +166,6 @@ def parse_bool_env(key: str, default: str) -> bool:
     raise RuntimeError(f"불리언 환경 변수 형식이 잘못되었습니다: {key}={raw}")
 
 
-def load_factory(spec: str):
-    if ":" not in spec:
-        raise RuntimeError("--llm-factory 형식은 module:function 이어야 합니다")
-    module_name, function_name = spec.split(":", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, function_name)
-
-
 async def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
@@ -182,8 +175,11 @@ async def main() -> int:
     config = build_config()
     embedding = parse_embedding(args.embedding, config.postgres.embedding_dim)
 
-    factory = load_factory(args.llm_factory)
-    llm = factory()
+    llm = ChatGoogleGenerativeAI(
+        model=os.environ["SEARCH_LLM_MODEL"],
+        temperature=SEARCH_LLM_TEMPERATURE,
+        google_api_key=os.environ["GOOGLE_API_KEY"],
+    )
 
     engine = VTreeSearchEngine(config=config, llm=llm)
 

@@ -19,13 +19,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from vtree_search.config.models import SearchConfig
 from vtree_search.contracts.job_models import (
+    JobState,
     SearchCandidate,
     SearchJobAccepted,
     SearchJobCanceled,
@@ -78,9 +80,25 @@ class VTreeSearchEngine:
                 f"expected={self._config.postgres.embedding_dim}, actual={len(query_embedding)}"
             )
 
-        self._queue.guard_capacity()
+        fingerprint = _build_search_fingerprint(
+            query_text=query_text,
+            query_embedding=query_embedding,
+            top_k=top_k,
+            metadata=metadata,
+        )
+        reusable = self._find_reusable_job(fingerprint)
+        if reusable is not None:
+            return reusable
 
         job_id = uuid4().hex
+        self._queue.guard_capacity()
+
+        if not self._queue.claim_fingerprint(fingerprint, job_id):
+            reusable = self._find_reusable_job(fingerprint)
+            if reusable is not None:
+                return reusable
+            self._queue.bind_fingerprint(fingerprint, job_id)
+
         submission = SearchSubmission(
             job_id=job_id,
             query_text=query_text,
@@ -93,18 +111,43 @@ class VTreeSearchEngine:
         payload_json = json.dumps(payload, ensure_ascii=False)
         module_name = self._config.redis.module_name_search
 
-        self._queue.create_job_record(job_id, payload_json, module_name=module_name)
-        self._queue.enqueue(
-            job_id=job_id,
-            payload_json=payload_json,
-            retries=0,
-            module_name=module_name,
-        )
+        try:
+            self._queue.create_job_record(job_id, payload_json, module_name=module_name)
+            self._queue.enqueue(
+                job_id=job_id,
+                payload_json=payload_json,
+                retries=0,
+                module_name=module_name,
+            )
+        except Exception:
+            self._queue.release_fingerprint_if_owner(fingerprint, job_id)
+            raise
 
         return SearchJobAccepted(
             job_id=job_id,
             state="PENDING",
             submitted_at=_utc_now(),
+        )
+
+    def _find_reusable_job(self, fingerprint: str) -> SearchJobAccepted | None:
+        existing_job_id = self._queue.find_job_id_by_fingerprint(fingerprint)
+        if existing_job_id is None:
+            return None
+
+        record = self._queue.get_job_record(existing_job_id)
+        if record is None:
+            return None
+
+        state_raw = str(record.get("state", "PENDING"))
+        if state_raw not in {"PENDING", "RUNNING", "SUCCEEDED"}:
+            return None
+
+        state = cast(JobState, state_raw)
+        submitted_at = str(record.get("created_at") or record.get("updated_at") or _utc_now())
+        return SearchJobAccepted(
+            job_id=existing_job_id,
+            state=state,
+            submitted_at=submitted_at,
         )
 
     def get_job(self, job_id: str) -> SearchJobStatus:
@@ -205,12 +248,21 @@ class VTreeSearchEngine:
             self._queue.ack(message)
             return
 
+        state = str(record.get("state", "PENDING"))
+        if state in {"SUCCEEDED", "FAILED", "CANCELED"}:
+            self._queue.ack(message)
+            return
+
         if record.get("canceled", "0") == "1":
             self._queue.mark_canceled(job_id)
             self._queue.ack(message)
             return
 
-        retries = int(message.fields.get("retries", record.get("retries", "0") or "0") or "0")
+        record_retries = int(record.get("retries", "0") or "0")
+        retries = int(message.fields.get("retries", str(record_retries)) or "0")
+        if retries < record_retries:
+            self._queue.ack(message)
+            return
         self._queue.mark_running(job_id, retries)
 
         payload_json = message.fields.get("payload_json") or record.get("payload_json") or ""
@@ -337,6 +389,8 @@ class VTreeSearchEngine:
             "top_k": submission.top_k,
             "entry_limit": self._config.entry_limit,
             "page_limit": self._config.page_limit,
+            "candidate_pool_factor": self._config.candidate_pool_factor,
+            "early_stop_min_entries": self._config.early_stop_min_entries,
             "worker_concurrency": self._config.worker_concurrency,
             "postgres": {
                 "dsn": self._config.postgres.to_dsn(),
@@ -377,3 +431,25 @@ def _to_decision_map(
 
 def _utc_now() -> str:
     return datetime.now(tz=UTC).isoformat()
+
+
+def _build_search_fingerprint(
+    *,
+    query_text: str,
+    query_embedding: list[float],
+    top_k: int,
+    metadata: dict[str, object] | None,
+) -> str:
+    payload = {
+        "query_text": " ".join(query_text.split()),
+        "query_embedding": [round(float(value), 6) for value in query_embedding],
+        "top_k": int(top_k),
+        "metadata": metadata or {},
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

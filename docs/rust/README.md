@@ -1,4 +1,4 @@
-# Rust 계층 개요 (Phase 3)
+# Rust 계층 개요
 
 ## 관련 문서
 
@@ -18,8 +18,8 @@
   - `SearchBridge`: 검색 JSON 실행 진입점
   - `IngestionBridge`: 적재 JSON 실행 진입점
 - `core/`
-  - `search_pipeline`: DB 검색/후보 확장
-  - `ingestion_pipeline`: 적재 파이프라인
+  - `search_pipeline`: DB 검색/후보 확장(후보 dedupe + 조기 종료)
+  - `ingestion_pipeline`: 적재 파이프라인(upsert/rebuild)
   - `errors`: 오류 모델
 - `index/`
   - `postgres_repo`: 조회/upsert 저장소
@@ -32,3 +32,4 @@
 - DB 쿼리는 Rust에서 직접 수행
 - LLM 필터/주석은 Python 계층에서 수행
 - 오류는 문자열이 아닌 구조적 타입(`CoreError`)으로 분류
+- Python 계층과는 JSON payload 인터페이스로 통신

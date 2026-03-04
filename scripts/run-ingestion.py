@@ -5,7 +5,7 @@
 설명:
 - 라이브러리 본체는 환경 파일을 직접 읽지 않는다.
 - 이 스크립트는 파일 경로 기반 page 노드 생성 후 summary/page 업서트를 수행한다.
-- 표/이미지 주석은 LangChain LLM을 팩토리 함수로 주입해 처리한다.
+- 표/이미지 주석 모델명은 `.env`에서 읽고 temperature는 코드 상수로 고정해 주입한다.
 
 디자인 패턴:
 - 드라이버(Driver Script).
@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import os
 import sys
 from pathlib import Path
+
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from vtree_search import (
     IngestionConfig,
     IngestionPreprocessConfig,
     IngestionSummaryNode,
     PostgresConfig,
+    SummaryStateConfig,
     VtreeIngestor,
 )
 
@@ -45,12 +47,19 @@ REQUIRED_ENV_KEYS = [
     "VTREE_SUMMARY_TABLE",
     "VTREE_PAGE_TABLE",
     "VTREE_EMBEDDING_DIM",
+    "REDIS_HOST",
+    "REDIS_PORT",
+    "REDIS_DB",
+    "INGESTION_LLM_MODEL",
+    "GOOGLE_API_KEY",
 ]
+INGESTION_LLM_TEMPERATURE = 0.0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Vtree Ingestion 드라이버")
     parser.add_argument("--document-id", required=True, help="대상 문서 ID")
+    parser.add_argument("--document-version", default="v1", help="문서 버전 식별자")
     parser.add_argument("--parent-node-id", required=True, help="page 노드의 부모(summary) 노드 ID")
     parser.add_argument("--summary-node-id", required=True, help="summary 노드 ID")
     parser.add_argument("--summary-path", required=True, help="summary 노드 ltree path")
@@ -70,14 +79,6 @@ def parse_args() -> argparse.Namespace:
         "--sample",
         action="store_true",
         help="확장자별 1개 파일만 처리",
-    )
-    parser.add_argument(
-        "--llm-factory",
-        default="",
-        help=(
-            "LangChain 채팅 모델 팩토리 경로 (예: app.llm_factories:create_ingestion_llm). "
-            "표/이미지 주석이 활성화된 경우 필수"
-        ),
     )
     parser.add_argument(
         "--env-file",
@@ -153,18 +154,18 @@ def build_config() -> IngestionConfig:
         asset_output_dir=os.environ.get("INGEST_ASSET_OUTPUT_DIR", "data/ingestion-assets"),
     )
 
-    return IngestionConfig(
-        postgres=postgres,
-        preprocess=preprocess,
+    summary_state = SummaryStateConfig(
+        host=os.environ["REDIS_HOST"],
+        port=int(os.environ["REDIS_PORT"]),
+        db=int(os.environ["REDIS_DB"]),
+        username=os.environ.get("REDIS_USERNAME") or None,
+        password=os.environ.get("REDIS_PASSWORD") or None,
+        use_ssl=parse_bool_env("REDIS_USE_SSL", "false"),
+        ttl_sec=int(os.environ.get("SUMMARY_STATE_TTL_SEC", "86400")),
+        lock_ttl_sec=int(os.environ.get("SUMMARY_STATE_LOCK_TTL_SEC", "120")),
     )
 
-
-def load_factory(spec: str):
-    if ":" not in spec:
-        raise RuntimeError("--llm-factory 형식은 module:function 이어야 합니다")
-    module_name, function_name = spec.split(":", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, function_name)
+    return IngestionConfig(postgres=postgres, preprocess=preprocess, summary_state=summary_state)
 
 
 async def main() -> int:
@@ -184,12 +185,11 @@ async def main() -> int:
     )
     llm = None
     if annotation_enabled:
-        if not args.llm_factory:
-            raise RuntimeError(
-                "표/이미지 주석이 활성화되어 있어 --llm-factory가 필요합니다"
-            )
-        factory = load_factory(args.llm_factory)
-        llm = factory()
+        llm = ChatGoogleGenerativeAI(
+            model=os.environ["INGESTION_LLM_MODEL"],
+            temperature=INGESTION_LLM_TEMPERATURE,
+            google_api_key=os.environ["GOOGLE_API_KEY"],
+        )
 
     summary_node = IngestionSummaryNode(
         node_id=args.summary_node_id,
@@ -207,6 +207,7 @@ async def main() -> int:
         parent_node_id=args.parent_node_id,
         input_root=args.input_root,
         sample=args.sample,
+        document_version=args.document_version,
     )
 
     print("[ingestion-result]", result.model_dump_json(ensure_ascii=False))

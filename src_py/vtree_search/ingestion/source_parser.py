@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Iterable
@@ -121,19 +122,68 @@ class SourceParser:
 
     def _extract_markdown(self, path: Path) -> list[ExtractedBlock]:
         text = path.read_text(encoding="utf-8")
-        paragraphs = [" ".join(part.split()) for part in text.split("\n\n") if part.strip()]
-
+        lines = text.splitlines()
         blocks: list[ExtractedBlock] = []
-        for index, paragraph in enumerate(paragraphs, start=1):
+        paragraph_buffer: list[str] = []
+        block_index = 0
+
+        def flush_paragraph() -> None:
+            nonlocal block_index
+            if not paragraph_buffer:
+                return
+            paragraph_text = " ".join(" ".join(paragraph_buffer).split()).strip()
+            paragraph_buffer.clear()
+            if not paragraph_text:
+                return
+            block_index += 1
             blocks.append(
                 ExtractedBlock(
                     source_file=path.as_posix(),
-                    page_num=index,
+                    page_num=block_index,
                     block_type="paragraph",
-                    text=paragraph,
-                    metadata={"layout_type": "markdown", "page_num": index},
+                    text=paragraph_text,
+                    metadata={
+                        "layout_type": "markdown",
+                        "page_num": block_index,
+                        "block_type": "paragraph",
+                        "heading_tag": "BODY",
+                    },
                 )
             )
+
+        for raw_line in lines:
+            stripped = raw_line.strip()
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if heading_match:
+                flush_paragraph()
+                heading_text = " ".join(heading_match.group(2).split()).strip()
+                if not heading_text:
+                    continue
+                heading_level = len(heading_match.group(1))
+                block_index += 1
+                blocks.append(
+                    ExtractedBlock(
+                        source_file=path.as_posix(),
+                        page_num=block_index,
+                        block_type="heading",
+                        text=heading_text,
+                        metadata={
+                            "layout_type": "markdown",
+                            "page_num": block_index,
+                            "block_type": "heading",
+                            "heading_level": heading_level,
+                            "heading_tag": f"H{heading_level}",
+                        },
+                    )
+                )
+                continue
+
+            if stripped:
+                paragraph_buffer.append(stripped)
+            else:
+                flush_paragraph()
+
+        flush_paragraph()
         return blocks
 
     async def _extract_docx(self, path: Path) -> list[ExtractedBlock]:

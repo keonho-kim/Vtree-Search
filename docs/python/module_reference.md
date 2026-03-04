@@ -1,4 +1,4 @@
-# Python 모듈 레퍼런스 (Phase 3)
+# Python 모듈 레퍼런스
 
 ## 관련 문서
 
@@ -12,7 +12,7 @@
 ## `vtree_search/__init__.py`
 
 - 공개 클래스: `VtreeIngestor`, `VTreeSearchEngine`
-- 공개 설정: `PostgresConfig`, `RedisQueueConfig`, `SearchConfig`, `IngestionConfig`
+- 공개 설정: `PostgresConfig`, `RedisQueueConfig`, `SearchConfig`, `IngestionConfig`, `SummaryStateConfig`
 - 공개 LLM 어댑터: `LangChainSearchFilterLLM`, `LangChainIngestionAnnotationLLM`
 
 ## `vtree_search/config/models.py`
@@ -21,6 +21,7 @@
 - `RedisQueueConfig`
 - `SearchConfig`
 - `IngestionPreprocessConfig`
+- `SummaryStateConfig`
 - `IngestionConfig`
 
 ## `vtree_search/llm/contracts.py`
@@ -61,6 +62,8 @@
 
 - `RustRuntimeBridge.execute_search_job(payload)`
 - `RustRuntimeBridge.execute_ingestion_job(payload)`
+- `RustRuntimeBridge.search_status()`
+- `RustRuntimeBridge.ingestion_status()`
 
 ## `vtree_search/queue/redis_streams.py`
 
@@ -71,6 +74,7 @@
   - `read()`
   - `ack()`
   - `move_to_dlq()`
+  - `mark_*()` 상태 전이 메서드군
 
 ## `vtree_search/search/engine.py`
 
@@ -80,7 +84,7 @@
 - `VTreeSearchEngine.cancel_job()`
 - `VTreeSearchEngine.run_worker_once()` (`async`)
 - `VTreeSearchEngine.run_worker_forever()` (`async`)
-- 생성자 입력: `llm`에 `ChatOpenAI`/`ChatGoogleGenerativeAI`/`ChatAnthropic` 같은 LangChain 채팅 모델을 직접 전달한다.
+- 생성자 입력: `llm`에 LangChain 채팅 모델을 직접 전달한다.
 
 ## `vtree_search/ingestion/ingestor.py`
 
@@ -89,7 +93,20 @@
 - `VtreeIngestor.rebuild_summary_embeddings()` (`async`)
 - `VtreeIngestor.build_page_nodes_from_path()` (`async`)
 - `VtreeIngestor.upsert_document_from_path()` (`async`)
-- 생성자 입력: `llm`에 LangChain 채팅 모델을 직접 전달한다.
+- 핵심 동작: 헤딩 기반 sub-ch 생성 + title 생성 + `summary_state` 누적
+
+## `vtree_search/ingestion/summary_state.py`
+
+- `RedisSummaryStateStore`
+  - `acquire_writer_lock()`
+  - `release_writer_lock()`
+  - `initialize_run()`
+  - `add_page_done()`
+  - `upsert_subch_state()`
+  - `upsert_ch_state()`
+  - `upsert_doc_state()`
+  - `mark_failed()`
+  - `mark_succeeded()`
 
 ## `vtree_search/ingestion/source_parser.py`
 

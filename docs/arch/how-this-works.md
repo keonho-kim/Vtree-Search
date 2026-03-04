@@ -1,4 +1,4 @@
-# Vtree Search 런타임 동작 문서 (Phase 3)
+# Vtree Search 런타임 동작 문서
 
 ## 관련 문서
 
@@ -16,38 +16,62 @@
 - 큐: Redis Streams
 - DB: PostgreSQL (`pgvector`, `ltree`)
 - LLM: Python 주입 LangChain 객체(`ainvoke`)
+- 적재 중간 상태: Redis `summary_state`
 
 ## 2. 검색 실행 시퀀스
 
 1. `submit_search(query_text, query_embedding, top_k)` 호출
-2. 큐 포화 검사
+2. fingerprint 계산 후 중복 검사
+   - 동일 요청이 `PENDING`/`RUNNING`/`SUCCEEDED`면 기존 job 재사용
+3. 큐 포화 검사
    - `depth >= QUEUE_REJECT_AT`면 즉시 거절
-3. `job:{id}` 상태 해시 생성(`PENDING`)
-4. Stream(`search:jobs`)에 메시지 enqueue
-5. 워커(`await run_worker_once`/`await run_worker_forever`)가 메시지 소비
-6. 상태 `RUNNING` 전환 후 Rust 검색 파이프라인 실행
-7. Rust 확장 후보에 대해 LangChain 배치 필터(`ainvoke`) 실행
-8. 성공 시 `SUCCEEDED` + `result_json` 저장 + ACK
-9. 실패 시 재시도 또는 DLQ 이동 후 ACK
+4. `job:{id}` 상태 해시 생성(`PENDING`)
+   - `module_name` 필드에는 `REDIS_MODULE_SEARCH` 값이 기록
+5. Stream(`REDIS_STREAM_SEARCH`)에 메시지 enqueue
+6. 워커(`run_worker_once`/`run_worker_forever`)가 메시지 소비
+7. 상태 `RUNNING` 전환 후 Rust 검색 파이프라인 실행
+8. Rust가 summary 조회 + page 확장을 수행
+   - 후보 dedupe
+   - 조기 종료(`candidate_pool_factor`, `early_stop_min_entries`)
+9. Python이 LangChain 배치 필터(`ainvoke`) 적용 후 top-k 절삭
+10. 성공 시 `SUCCEEDED` + `result_json` 저장 + ACK
+11. 실패 시 재시도 또는 DLQ(`REDIS_STREAM_SEARCH_DLQ`) 이동 후 ACK
 
-## 3. 적재 실행 시퀀스
+## 3. 적재 실행 시퀀스 (`upsert_document_from_path`)
 
-- `await VtreeIngestor.upsert_document()`
-  - summary/page 노드 업서트
-- `await VtreeIngestor.upsert_pages()`
-  - page 노드만 업서트
-- `await VtreeIngestor.rebuild_summary_embeddings()`
-  - summary 노드 갱신 트리거 실행
-- `await VtreeIngestor.build_page_nodes_from_path()`
-  - Markdown/PDF/DOCX 파싱
-  - PDF 표/이미지, DOCX 표를 LLM 주석 생성
-  - 레이아웃 메타데이터 포함 page 노드 변환
+1. 입력 검증
+   - `summary_nodes`가 비어 있으면 실패
+2. `summary_state` writer lock 획득
+   - 키: `sumstate:{document_id}:{version}:lock`
+3. SourceParser 실행
+   - Markdown/PDF/DOCX 블록 추출
+   - PDF 표/이미지, DOCX 표 LLM 주석
+4. 헤딩 기반 sub-ch 생성
+   - Markdown 헤딩/문단 메타데이터 기반 그룹화
+   - `sub-ch/ch/doc` 제목 생성
+5. `summary_state` 단계 기록
+   - `initialize_run(PAGE)`
+   - `page_done` 업데이트
+   - `subch/ch/doc(DRAFT)` revision 기반 upsert
+6. Rust 적재 실행
+   - `upsert_document`로 summary/page 업서트
+7. 완료 상태 전이
+   - 성공: `doc=FINAL`, `meta=SUCCEEDED`
+   - 실패: `meta=FAILED`
+8. lock 해제
 
-## 4. 잡 상태 머신
+## 4. 상태 머신
 
-- `PENDING` -> `RUNNING` -> `SUCCEEDED`
-- `PENDING` -> `RUNNING` -> `FAILED`
-- `PENDING`/`RUNNING` -> `CANCELED`
+### 검색 job 상태
+
+- `PENDING -> RUNNING -> SUCCEEDED`
+- `PENDING -> RUNNING -> FAILED`
+- `PENDING/RUNNING -> CANCELED`
+
+### 적재 run 상태(`summary_state.meta.status`)
+
+- `RUNNING -> SUCCEEDED`
+- `RUNNING -> FAILED`
 
 ## 5. 운영 지표
 
@@ -63,6 +87,8 @@
 - `search_llm_filter_error_rate`
 - `ingestion_llm_annotation_latency_ms`
 - `ingestion_llm_annotation_error_rate`
+- `summary_state_failed_runs`
+- `summary_state_lock_acquire_failures`
 
 ## 6. 서비스 레벨 목표(초기값)
 
@@ -77,3 +103,4 @@
 - TTL 만료: `JobExpiredError`
 - 실행 실패: `JobFailedError`
 - 의존성 없음: `DependencyUnavailableError`
+- 적재 파싱/주석 실패: `IngestionProcessingError`

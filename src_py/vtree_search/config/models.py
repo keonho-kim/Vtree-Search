@@ -94,6 +94,8 @@ class SearchConfig(BaseModel):
     retry_max_ms: int = Field(default=2_000, ge=1)
     entry_limit: int = Field(default=3, ge=1)
     page_limit: int = Field(default=50, ge=1)
+    candidate_pool_factor: int = Field(default=3, ge=1)
+    early_stop_min_entries: int = Field(default=1, ge=1)
 
     @field_validator("retry_max_ms")
     @classmethod
@@ -101,6 +103,14 @@ class SearchConfig(BaseModel):
         retry_base_ms = info.data.get("retry_base_ms", 200)
         if value < retry_base_ms:
             raise ValueError("retry_max_ms는 retry_base_ms 이상이어야 합니다")
+        return value
+
+    @field_validator("early_stop_min_entries")
+    @classmethod
+    def validate_early_stop_min_entries(cls, value: int, info) -> int:
+        entry_limit = info.data.get("entry_limit", 3)
+        if value > entry_limit:
+            raise ValueError("early_stop_min_entries는 entry_limit 이하이어야 합니다")
         return value
 
 
@@ -114,8 +124,22 @@ class IngestionPreprocessConfig(BaseModel):
     asset_output_dir: str = Field(default="data/ingestion-assets", min_length=1)
 
 
+class SummaryStateConfig(BaseModel):
+    """Redis 기반 summary_state 설정 모델."""
+
+    host: str = Field(min_length=1)
+    port: int = Field(default=6379, ge=1, le=65535)
+    db: int = Field(default=0, ge=0)
+    username: str | None = Field(default=None)
+    password: str | None = Field(default=None)
+    use_ssl: bool = Field(default=False)
+    ttl_sec: int = Field(default=86_400, ge=60)
+    lock_ttl_sec: int = Field(default=120, ge=5)
+
+
 class IngestionConfig(BaseModel):
     """적재 엔진 설정 모델."""
 
     postgres: PostgresConfig
     preprocess: IngestionPreprocessConfig = Field(default_factory=IngestionPreprocessConfig)
+    summary_state: SummaryStateConfig | None = Field(default=None)

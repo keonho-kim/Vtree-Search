@@ -20,6 +20,7 @@ from .config.models import (
     PostgresConfig,
     RedisQueueConfig,
     SearchConfig,
+    SummaryStateConfig,
 )
 from .contracts.ingestion_models import (
     IngestionDocument,
@@ -64,6 +65,7 @@ __all__ = [
     "PostgresConfig",
     "RedisQueueConfig",
     "IngestionPreprocessConfig",
+    "SummaryStateConfig",
     "SearchFilterCandidate",
     "SearchFilterDecision",
     "LangChainSearchFilterLLM",
